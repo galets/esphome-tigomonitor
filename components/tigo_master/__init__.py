@@ -118,10 +118,10 @@ def _network_key(value):
 
 INITIALIZE_TAP_SCHEMA = cv.Schema(
     {
-        cv.Optional(CONF_CHANNEL, default=0): cv.int_range(min=11, max=26),
-        cv.Optional(CONF_PAN, default=0): _pan_id,
-        cv.Optional(CONF_KEY, default=[]): _network_key,
-        cv.Optional(CONF_PROFILE, default=0): cv.one_of(40, 75, 120, 300, int=True),
+        cv.Optional(CONF_CHANNEL): cv.int_range(min=11, max=26),
+        cv.Optional(CONF_PAN): _pan_id,
+        cv.Optional(CONF_KEY): _network_key,
+        cv.Optional(CONF_PROFILE): cv.one_of(40, 75, 120, 300, int=True),
     }
 )
 
@@ -270,10 +270,10 @@ async def to_code(config):
         cg.add(
             var.set_initialize_tap(
                 True,
-                init_cfg[CONF_CHANNEL],
-                init_cfg[CONF_PAN],
-                init_cfg[CONF_PROFILE],
-                init_cfg[CONF_KEY],
+                init_cfg.get(CONF_CHANNEL, 0),
+                init_cfg.get(CONF_PAN, 0),
+                init_cfg.get(CONF_PROFILE, 0),
+                init_cfg.get(CONF_KEY, []),
             )
         )
     if CONF_STATUS in config:
