@@ -79,6 +79,7 @@ void TigoMasterComponent::setup() {
   if (standby_)
     core_->set_standby(takeover_s_, [this](const char *d, size_t n) { on_listen_(d, n); },
                        [this] { return learned_.entries(); });
+  if (initialize_tap_.enabled) core_->set_initialize_tap(initialize_tap_);
   // The TAPs: the YAML's, else the ones saved; neither, the one at gateway_id.
   taps_pref_ = global_preferences->make_preference<TapsPref>(fnv1_hash("tigo_master_taps"));
   std::vector<MasterCore::TapEntry> taps;
@@ -286,6 +287,15 @@ void TigoMasterComponent::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Bring-up: %s, housekeeping: %s, queries: %s%s", YESNO(startup_), YESNO(housekeeping_),
                 YESNO(queries_), writes_ ? " (with the CCA's two writes)" : "");
+  if (initialize_tap_.enabled) {
+    char pan_buf[16];
+    if (initialize_tap_.pan) snprintf(pan_buf, sizeof(pan_buf), "%04X", initialize_tap_.pan);
+    else snprintf(pan_buf, sizeof(pan_buf), "auto");
+    ESP_LOGCONFIG(TAG, "  Initialize TAP: YES (channel: %s, PAN: %s, profile: %s, key: %s)",
+                  initialize_tap_.channel ? std::to_string(initialize_tap_.channel).c_str() : "auto", pan_buf,
+                  initialize_tap_.profile ? std::to_string(initialize_tap_.profile).c_str() : "auto",
+                  initialize_tap_.has_key ? "configured (hidden)" : "auto");
+  }
 }
 
 }  // namespace tigo_master

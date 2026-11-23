@@ -2334,7 +2334,131 @@ static void test_without_learning_the_list_stays() {
   core.close();
 }
 
+// initialize_tap: a TAP on factory radio settings (channel 0, all-zero key)
+// is automatically provisioned on startup, without needing table_writes or
+// startup mode (it asks GET_MAC_NOW first when startup is off).
+static void test_initialize_tap_provisions_factory_tap() {
+  MultiTap bus;
+  bus.taps = {{0x1201, 1}};
+  give_radio(bus, 0x1201, factory_radio());
+  std::vector<std::string> lines;
+  MasterCore core(&bus.port, [&](int, const std::string &l) { lines.push_back(l); }, nullptr, nullptr, 0x1201, false,
+                  /*startup=*/false);
+  MasterCore::InitializeTapConfig cfg;
+  cfg.enabled = true;
+  core.set_initialize_tap(cfg);
+  CHECK(core.open());
+  run_for(core, 0, 20000, 50);
+  const auto *t = bus.at(0x1201);
+  CHECK(t->cfg.channel == 15);
+  CHECK(t->cfg.pan == 0x0001);
+  CHECK(std::none_of(t->cfg.key.begin(), t->cfg.key.end(), [](uint8_t b) { return b == 0x00 || b == 0xFF; }));
+  CHECK(t->cfg_stored == t->cfg);  // MultiTap reports G8.59, so CMD_STORE was sent and committed
+  CHECK(core.status().table_edit.finished && core.status().table_edit.ok);
+  core.close();
+}
+
+// initialize_tap with overrides: uses configured channel, PAN, profile, and key.
+static void test_initialize_tap_respects_overrides() {
+  MultiTap bus;
+  bus.taps = {{0x1201, 1}};
+  give_radio(bus, 0x1201, factory_radio());
+  MasterCore core(&bus.port, [](int, const std::string &) {}, nullptr, nullptr, 0x1201, false, /*startup=*/true);
+  MasterCore::InitializeTapConfig cfg;
+  cfg.enabled = true;
+  cfg.channel = 20;
+  cfg.pan = 0x4C3D;
+  cfg.profile = 120;
+  cfg.has_key = true;
+  for (int i = 0; i < 16; i++) cfg.key[i] = static_cast<uint8_t>(0x21 + i);
+  core.set_initialize_tap(cfg);
+  CHECK(core.open());
+  run_for(core, 0, 20000, 50);
+  const auto *t = bus.at(0x1201);
+  CHECK(t->cfg.channel == 20);
+  CHECK(t->cfg.pan == 0x4C3D);
+  CHECK(t->cfg.map[0] == 20);  // 120-optimizer profile
+  CHECK(t->cfg.key == cfg.key);
+  CHECK(t->cfg_stored == t->cfg);
+  core.close();
+}
+
+// initialize_tap: a TAP already initialized (valid channel 11..26 and non-zero key)
+// bypasses provisioning without writing anything.
+static void test_initialize_tap_bypasses_initialized_tap() {
+  MultiTap bus;
+  bus.taps = {{0x1201, 1}};
+  give_radio(bus, 0x1201, radio(25, 0x7E21, 0x30));
+  std::vector<std::string> lines;
+  MasterCore core(&bus.port, [&](int, const std::string &l) { lines.push_back(l); }, nullptr, nullptr, 0x1201, false,
+                  /*startup=*/false);
+  MasterCore::InitializeTapConfig cfg;
+  cfg.enabled = true;
+  core.set_initialize_tap(cfg);
+  CHECK(core.open());
+  run_for(core, 0, 20000, 50);
+  const auto *t = bus.at(0x1201);
+  CHECK(t->cfg_reads == 1);
+  CHECK(t->cfg.channel == 25 && t->cfg.pan == 0x7E21 && t->cfg.key[0] == 0x30);
+  CHECK(!core.status().table_edit.active && !core.status().table_edit.finished);
+  bool bypassed = false;
+  for (const auto &l : lines)
+    if (l.find("initialize_tap") != std::string::npos && l.find("bypassing") != std::string::npos) bypassed = true;
+  CHECK(bypassed);
+  core.close();
+}
+
+// initialize_tap: if more than one TAP is configured or detected at the factory
+// address, logs an error and does nothing.
+static void test_initialize_tap_rejects_multiple_taps() {
+  {
+    MultiTap bus;
+    bus.taps = {{0x1201, 1}, {0x1202, 2}};
+    give_radio(bus, 0x1201, factory_radio());
+    give_radio(bus, 0x1202, factory_radio());
+    std::vector<std::string> lines;
+    MasterCore core(&bus.port, [&](int, const std::string &l) { lines.push_back(l); }, nullptr, nullptr, 0x1201, false,
+                    false);
+    core.set_taps({{0x1201, {}}, {0x1202, {}}});
+    MasterCore::InitializeTapConfig cfg;
+    cfg.enabled = true;
+    core.set_initialize_tap(cfg);
+    CHECK(core.open());
+    run_for(core, 0, 20000, 50);
+    CHECK(bus.at(0x1201)->cfg.channel == 0 && bus.at(0x1202)->cfg.channel == 0);
+    int errs = 0;
+    for (const auto &l : lines)
+      if (l.find("initialize_tap: multiple TAPs") != std::string::npos) errs++;
+    CHECK(errs == 1);
+    core.close();
+  }
+  {
+    // A second TAP detected at 0x1235 during startup scan also prevents initialization.
+    MultiTap bus;
+    bus.taps = {{0x1201, 1}, {0x1235, 9}};
+    give_radio(bus, 0x1201, factory_radio());
+    std::vector<std::string> lines;
+    MasterCore core(&bus.port, [&](int, const std::string &l) { lines.push_back(l); }, nullptr, nullptr, 0x1201, false,
+                    /*startup=*/true);
+    MasterCore::InitializeTapConfig cfg;
+    cfg.enabled = true;
+    core.set_initialize_tap(cfg);
+    CHECK(core.open());
+    run_for(core, 0, 20000, 50);
+    CHECK(bus.at(0x1201)->cfg.channel == 0);
+    int errs = 0;
+    for (const auto &l : lines)
+      if (l.find("initialize_tap: multiple TAPs") != std::string::npos) errs++;
+    CHECK(errs == 1);
+    core.close();
+  }
+}
+
 int main() {
+  test_initialize_tap_provisions_factory_tap();
+  test_initialize_tap_respects_overrides();
+  test_initialize_tap_bypasses_initialized_tap();
+  test_initialize_tap_rejects_multiple_taps();
   test_a_standby_learns_the_taps_another_master_polls();
   test_a_learned_tap_joins_a_saved_list();
   test_a_guess_the_master_polls_is_kept();

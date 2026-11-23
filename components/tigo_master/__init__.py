@@ -60,6 +60,11 @@ CONF_STARTUP = "startup"
 CONF_HOUSEKEEPING = "housekeeping"
 CONF_QUERIES = "queries"
 CONF_OPTIMIZER_WRITES = "optimizer_writes"
+CONF_INITIALIZE_TAP = "initialize_tap"
+CONF_CHANNEL = "channel"
+CONF_PAN = "pan"
+CONF_KEY = "key"
+CONF_PROFILE = "profile"
 CONF_PROBLEM = "problem"
 CONF_DISCOVERY_REMAINING = "discovery_remaining"
 CONF_TAKEOVERS = "takeovers"
@@ -91,6 +96,52 @@ def _unique_taps(value):
     return value
 
 
+def _pan_id(value):
+    value = cv.hex_int(value)
+    if not 1 <= value <= 0xFFFE:
+        raise cv.Invalid("a PAN id must be 0x0001-0xFFFE")
+    return value
+
+
+def _network_key(value):
+    s = cv.string_strict(value).strip().replace(" ", "")
+    if len(s) != 32:
+        raise cv.Invalid("a network key is 16 bytes (32 hex digits)")
+    try:
+        raw = bytes.fromhex(s)
+    except ValueError as err:
+        raise cv.Invalid("a network key must be 32 hex digits") from err
+    if any(b in (0x00, 0xFF) for b in raw):
+        raise cv.Invalid("a network key cannot contain 0x00 or 0xFF bytes")
+    return list(raw)
+
+
+INITIALIZE_TAP_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_CHANNEL, default=0): cv.int_range(min=11, max=26),
+        cv.Optional(CONF_PAN, default=0): _pan_id,
+        cv.Optional(CONF_KEY, default=[]): _network_key,
+        cv.Optional(CONF_PROFILE, default=0): cv.one_of(40, 75, 120, 300, int=True),
+    }
+)
+
+
+def _initialize_tap(value):
+    if isinstance(value, bool):
+        if not value:
+            return None
+        return INITIALIZE_TAP_SCHEMA({})
+    if isinstance(value, dict):
+        return INITIALIZE_TAP_SCHEMA(value)
+    raise cv.Invalid("initialize_tap must be true, false, or a mapping of radio settings (channel, pan, key, profile)")
+
+
+def _initialize_tap_single_tap(config):
+    if config.get(CONF_INITIALIZE_TAP) is not None and len(config.get(CONF_TAPS, [])) > 1:
+        raise cv.Invalid("initialize_tap does not support multiple TAPs")
+    return config
+
+
 def _writes_need_queries(config):
     if config[CONF_OPTIMIZER_WRITES] and not config[CONF_QUERIES]:
         raise cv.Invalid(f"{CONF_OPTIMIZER_WRITES} needs {CONF_QUERIES}: the writes follow the queries' answers")
@@ -117,6 +168,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_HOUSEKEEPING, default=False): cv.boolean,
             cv.Optional(CONF_QUERIES, default=False): cv.boolean,
             cv.Optional(CONF_OPTIMIZER_WRITES, default=False): cv.boolean,
+            cv.Optional(CONF_INITIALIZE_TAP): _initialize_tap,
             # What tigo_monitor's check reads off the uart it is given: the bus's.
             cv.Optional(CONF_BAUD_RATE, default=38400): cv.one_of(38400, int=True),
             cv.Optional(CONF_DATA_BITS, default=8): cv.one_of(8, int=True),
@@ -156,6 +208,7 @@ CONFIG_SCHEMA = cv.All(
     cv.only_on_esp32,
     cv.only_with_framework("esp-idf"),
     _writes_need_queries,
+    _initialize_tap_single_tap,
 )
 
 
@@ -212,6 +265,17 @@ async def to_code(config):
     cg.add(var.set_startup(config[CONF_STARTUP]))
     cg.add(var.set_housekeeping(config[CONF_HOUSEKEEPING]))
     cg.add(var.set_queries(config[CONF_QUERIES], config[CONF_OPTIMIZER_WRITES]))
+    if config.get(CONF_INITIALIZE_TAP) is not None:
+        init_cfg = config[CONF_INITIALIZE_TAP]
+        cg.add(
+            var.set_initialize_tap(
+                True,
+                init_cfg[CONF_CHANNEL],
+                init_cfg[CONF_PAN],
+                init_cfg[CONF_PROFILE],
+                init_cfg[CONF_KEY],
+            )
+        )
     if CONF_STATUS in config:
         cg.add(var.set_status_sensor(await text_sensor.new_text_sensor(config[CONF_STATUS])))
     if CONF_PROBLEM in config:

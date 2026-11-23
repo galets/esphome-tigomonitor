@@ -123,6 +123,17 @@ class TigoMasterComponent : public Component, public uart::UARTComponent {
     queries_ = on;
     writes_ = on && writes;
   }
+  void set_initialize_tap(bool enabled, uint16_t channel, uint16_t pan, int profile,
+                          const std::vector<uint8_t> &key) {
+    initialize_tap_.enabled = enabled;
+    initialize_tap_.channel = channel;
+    initialize_tap_.pan = pan;
+    initialize_tap_.profile = profile;
+    if (key.size() == 16) {
+      std::copy(key.begin(), key.end(), initialize_tap_.key.begin());
+      initialize_tap_.has_key = true;
+    }
+  }
 #ifdef USE_TEXT_SENSOR
   void set_status_sensor(text_sensor::TextSensor *s) { status_sensor_ = s; }
 #endif
@@ -183,6 +194,7 @@ class TigoMasterComponent : public Component, public uart::UARTComponent {
   uint16_t gateway_id_ = 0x1201;
   std::vector<uint16_t> fixed_taps_;
   bool startup_ = false, housekeeping_ = false, queries_ = false, writes_ = false;
+  MasterCore::InitializeTapConfig initialize_tap_;
 
   std::unique_ptr<UartTransport> port_;
   std::unique_ptr<MasterCore> core_;

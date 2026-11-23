@@ -347,6 +347,19 @@ class MasterCore {
   // read, 0x0D 00 00), for its channel and SLT. Off unless the owner asks;
   // call before open().
   void set_read_tap_config(bool on) { read_tap_config_ = on; }
+  // Initialize a single TAP's radio settings on startup if it is still on
+  // factory radio settings (channel outside 11..26 or an all-zero key).
+  // If already initialized, bypasses provisioning. Multiple TAPs are not
+  // supported and log an error without writing anything.
+  struct InitializeTapConfig {
+    bool enabled = false;
+    uint16_t channel = 0;  // 0: auto (channel_for({}))
+    uint16_t pan = 0;      // 0: auto (pan_for(tap_mac, {}))
+    int profile = 0;       // 0: auto-size / keep valid TAP profile; or 40, 75, 120, 300
+    std::array<uint8_t, 16> key{};
+    bool has_key = false;  // false: draw random key (no 0x00 or 0xFF bytes)
+  };
+  void set_initialize_tap(const InitializeTapConfig &cfg) { initialize_tap_ = cfg; }
   // The Pi's: every TAP's settings read at start, so its key can be compared
   // and shared, and each TAP told the others' networks (0xE1). Off on the
   // ESP32.
@@ -475,6 +488,8 @@ class MasterCore {
     bool readdressed = false;         // the last bring-up moved it off the factory address
     bool session_reset_sent = false;  // the 0x0B00 00, sent once per start, as after a CCA reboot
     bool config_read_sent = false;    // once a master lifetime, not at each takeover
+    bool init_mac_asked = false;      // GET_MAC_NOW asked once for initialize_tap when startup is off
+    bool init_checked = false;        // initialize_tap evaluated this start/recovery
     // Its radio settings from its last GatewayCfg read, whoever asked: kept
     // here only, as they hold the network key.
     std::optional<esphome::tigo_monitor::master::RadioBlock> radio;
@@ -542,9 +557,20 @@ class MasterCore {
   bool bench_, startup_;
   bool housekeeping_on_;
   bool read_tap_config_ = false;
+  InitializeTapConfig initialize_tap_;
+  bool init_multi_tap_logged_ = false;
   bool known_networks_ = false;
   // With one TAP there's no key to share and no one to tell: no read added.
-  bool reads_config_() const { return read_tap_config_ || (known_networks_ && taps_.size() > 1); }
+  bool reads_config_() const {
+    return read_tap_config_ || initialize_tap_.enabled || (known_networks_ && taps_.size() > 1);
+  }
+  static bool is_factory_radio_(const esphome::tigo_monitor::master::RadioBlock &b) {
+    bool bad_channel = b.channel < esphome::tigo_monitor::master::CHANNEL_MIN ||
+                       b.channel > esphome::tigo_monitor::master::CHANNEL_MAX;
+    bool zero_key = std::all_of(b.key.begin(), b.key.end(), [](uint8_t k) { return k == 0; });
+    return bad_channel || zero_key;
+  }
+  void maybe_initialize_tap_(Tap &t);
   void sync_key_words_();
   void known_networks_due_() {
     for (auto &t : taps_) {

@@ -632,7 +632,7 @@ void MasterCore::settle_table_job_(uint32_t now_ms) {
   bool done = table_job_->finished();
   sync_table_status_(done);
   if (!done) return;
-  // Giving a TAP its radio settings touches no table: nothing to save,
+    // Giving a TAP its radio settings touches no table: nothing to save,
   // watch or follow.
   if (std::string(table_job_->kind()) == "provision" || std::string(table_job_->kind()) == "period") {
     const char *what = std::string(table_job_->kind()) == "period" ? "report period" : "radio settings";
@@ -640,9 +640,16 @@ void MasterCore::settle_table_job_(uint32_t now_ms) {
       LOGI("bus master: %s: %s", what, table_job_->message().c_str());
     else
       LOGW("bus master: %s: stopped: %s", what, table_job_->message().c_str());
-    // A TAP's network changed: every TAP is told the others' again.
-    if (table_job_->ok() && !table_job_->dry_run() && std::string(table_job_->kind()) == "provision")
+    // A TAP's network changed: update its cached radio settings and tell
+    // every TAP the others' networks again.
+    if (table_job_->ok() && !table_job_->dry_run() && std::string(table_job_->kind()) == "provision") {
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        tap->radio = static_cast<master::ProvisionJob *>(table_job_.get())->block();
+      }
+      sync_key_words_();
       known_networks_due_();
+    }
     table_job_.reset();
     return;
   }
@@ -819,6 +826,53 @@ void MasterCore::take_config_reply_(Tap &t, const Frame &reply) {
   // A network the others haven't been told about (a TAP read for the first
   // time after start, or changed): every TAP is owed an 0xE1 again.
   if (changed) known_networks_due_();
+  maybe_initialize_tap_(t);
+}
+
+void MasterCore::maybe_initialize_tap_(Tap &t) {
+  if (!initialize_tap_.enabled || t.init_checked || !t.radio) return;
+  t.init_checked = true;
+  if (several_() || !status().extra_taps.empty()) {
+    if (!init_multi_tap_logged_) {
+      init_multi_tap_logged_ = true;
+      LOGE("bus master: initialize_tap: multiple TAPs detected on the bus; multiple TAPs are not supported, skipping initialization");
+    }
+    return;
+  }
+  if (!is_factory_radio_(*t.radio)) {
+    LOGI("bus master: initialize_tap: TAP %04X is already initialized (channel %u); bypassing", t.id,
+         static_cast<unsigned>(t.radio->channel));
+    return;
+  }
+  if (t.mac.size() != 8) {
+    LOGE("bus master: initialize_tap: TAP %04X is on factory radio settings, but its MAC is unknown; skipping initialization",
+         t.id);
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (table_job_running_) {
+      LOGW("bus master: initialize_tap: another job is already running; skipping initialization");
+      return;
+    }
+    master::RadioBlock block;
+    block.channel = initialize_tap_.channel ? initialize_tap_.channel : master::channel_for({});
+    block.pan = initialize_tap_.pan ? initialize_tap_.pan : master::pan_for(t.mac, {});
+    int p = initialize_tap_.profile;
+    master::map_for_profile(p == 300 ? 24 : p == 120 ? 20 : p == 75 ? 14 : 12, block.map);
+    block.keep_tap_profile = (p == 0);
+    block.burden = t.st.discovery.node_count;
+    if (initialize_tap_.has_key) {
+      block.key = initialize_tap_.key;
+    } else {
+      std::random_device rd;
+      block.key = master::key_from([&rd]() { return static_cast<uint8_t>(rd()); });
+    }
+    block.saved_by_store = master::saves_with_store(t.st.version);
+    LOGW("bus master: initialize_tap: TAP %04X is on factory radio settings (channel %u); initializing with %s", t.id,
+         static_cast<unsigned>(t.radio->channel), block.describe().c_str());
+    start_table_job_(std::make_unique<master::ProvisionJob>(t.mac, block, /*reset=*/false, /*dry_run=*/false), t.id);
+  }
 }
 
 // The opening asks each TAP for its settings once; one that didn't answer
@@ -931,12 +985,22 @@ bool MasterCore::send_known_networks_(Tap &t, uint32_t now_ms) {
 }
 
 void MasterCore::restart_taps_() {
+  init_multi_tap_logged_ = false;
   for (auto &t : taps_) {
     t->window = master::WindowKeeper();
     drop_housekeeping_(*t);
     t->queries.reset();
     t->readdressed = false;
     t->timeouts_in_a_row = 0;
+    if (initialize_tap_.enabled) {
+      t->config_read_sent = false;
+      t->init_mac_asked = false;
+      t->init_checked = false;
+      t->cfg_tries = 0;
+      t->cfg_try_ms = 0;
+      t->cfg_gave_up = false;
+      t->radio.reset();
+    }
   }
 }
 
@@ -1247,7 +1311,16 @@ void MasterCore::tap_answered_(Tap &t) {
   t.known_due = true;  // it may have lost power, and its list with it
   t.known_tries = 0;
   t.known_next_ms = 0;
-  if (!t.radio && t.cfg_gave_up) {
+  if (initialize_tap_.enabled) {
+    std::lock_guard<std::mutex> lock(mu_);
+    t.config_read_sent = false;
+    t.init_mac_asked = false;
+    t.init_checked = false;
+    t.cfg_gave_up = false;
+    t.cfg_tries = 0;
+    t.cfg_try_ms = 0;
+    t.radio.reset();
+  } else if (!t.radio && t.cfg_gave_up) {
     std::lock_guard<std::mutex> lock(mu_);
     t.cfg_gave_up = false;
     t.cfg_tries = 0;
@@ -1365,6 +1438,24 @@ void MasterCore::tick_(uint32_t now_ms) {
   Tap *tp = next_tap_(now_ms);
   if (!tp) return;
   Tap &t = *tp;
+  if (initialize_tap_.enabled && (several_() || !status().extra_taps.empty()) && !init_multi_tap_logged_) {
+    init_multi_tap_logged_ = true;
+    for (auto &x : taps_) x->init_checked = true;
+    LOGE("bus master: initialize_tap: multiple TAPs detected on the bus; multiple TAPs are not supported, skipping initialization");
+  }
+  if (initialize_tap_.enabled && !several_() && status().extra_taps.empty() && t.mac.empty() && !t.init_mac_asked &&
+      !t.lost) {
+    t.init_mac_asked = true;
+    if (master::may_send(master::CMD_GET_MAC_NOW, {}, bench_, /*startup=*/true)) {
+      Frame r;
+      if (transact(t.id, master::CMD_GET_MAC_NOW, {}, r) && r.payload.size() >= 8) {
+        std::lock_guard<std::mutex> lock(mu_);
+        t.mac.assign(r.payload.begin(), r.payload.begin() + 8);
+        t.st.mac = master::mac_hex(t.mac);
+      }
+      return;
+    }
+  }
   if (!t.version_asked && !t.lost) {
     // A TAP just re-addressed gets the CCA's bring-up, which asks it anyway.
     if (t.readdressed) {
@@ -1550,7 +1641,9 @@ void MasterCore::tick_(uint32_t now_ms) {
   if (!req.cmd) return;  // nothing due: a lost TAP's window keeper waiting out a backoff
   // A provisioning check (dry run) only reads, and never builds the write:
   // its reads go with neither switch on, as other checks do.
-  bool provision_ok = req.provision && (bench_ || table_writes_on_ || (job_here && table_job_ && table_job_->dry_run()));
+  bool provision_ok =
+      req.provision &&
+      (bench_ || table_writes_on_ || initialize_tap_.enabled || (job_here && table_job_ && table_job_->dry_run()));
   if (!master::may_send(req.cmd, req.payload, bench_, bring_up, writes_on_, t.pv && t.pv->off(),
                         req.table_edit && table_writes_on_, provision_ok)) {
     set_fault(Fault::refused, "refused to send command " + std::to_string(req.cmd));
