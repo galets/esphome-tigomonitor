@@ -116,14 +116,33 @@ uart:
   rx_buffer_size: 2048  # Optimized for 8MB PSRAM
 
 # TigoMonitor component
-tigo_monitor:
-  id: tigo_hub
-  uart_id: tigo_uart
-  number_of_devices: 30  # Suitable for 8MB PSRAM
-  update_interval: 30s
+# tigo_monitor:
+#   id: tigo_hub
+#   uart_id: tigo_uart
+#   number_of_devices: 30  # Suitable for 8MB PSRAM
+#   update_interval: 30s
 
-# Custom web server
-tigo_server:
-  id: tigo_web
-  tigo_monitor_id: tigo_hub
-  port: 80
+# # Custom web server
+# tigo_server:
+#   id: tigo_web
+#   tigo_monitor_id: tigo_hub
+#   port: 80
+
+tigo_master:
+  id: bus
+  uart_id: tigo_uart
+  monitor_id: tigo_hub
+  # The only master on the bench: it runs the bus from boot.
+  role: master
+  # The one TAP. A TAP fresh from the factory is moved to this address.
+  taps: [0x1201]
+  housekeeping: true
+  queries: true
+  optimizer_writes: false
+  startup: true
+  status:
+    name: "Bus master"
+  problem:
+    name: "Bus master problem"
+  discovery_remaining:
+    name: "Bus master discovery window remaining"
