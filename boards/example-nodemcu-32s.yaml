@@ -1,0 +1,230 @@
+# Board: NodeMCU-32S (NodeMCU)
+# Definition: definitions/boards/nodemcu-32s/manifest.yaml
+
+esphome:
+  name: esp32-cca
+  friendly_name: "ESP32 Tigo Bench Master"
+  min_version: "2026.5.0"
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/galets/esphome-tigomonitor
+      ref: feature/esp32-master-network
+    components: [tigo_monitor, tigo_master]
+    refresh: 0s
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    advanced: 
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+      flash_chip: generic
+    sdkconfig_options:
+      CONFIG_UART_ISR_IN_IRAM: "y"
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240: "y"
+      CONFIG_LOG_DEFAULT_LEVEL_INFO: "y"
+
+# Enable logging
+logger:
+  level: DEBUG
+  logs:
+    esp-idf: WARN
+    wifi: NONE
+    tigo_monitor: DEBUG
+    tigo_master: DEBUG
+    uart: DEBUG
+
+time:
+  # - platform: homeassistant
+  #   id: homeassistant_time
+  - platform: sntp
+    id: tigo_time
+    # Defaults to pool.ntp.org. If you point servers: at your router,
+    # check it actually serves NTP — most do not, and a server that
+    # never answers leaves the clock at epoch 0 and history empty.
+    # Uncomment if the daily reset lands at the wrong hour:
+    timezone: "America/New_York"
+
+api:
+  encryption:
+    key: !secret esp32-ca-key
+  # Optional Home Assistant actions for adding/removing optimizers by barcode
+  # label (e.g. "4-9A57A2L") or 16-hex MAC (e.g. "04C05B40009A57A2").
+  # Requires `table_writes: true` under `tigo_master:`.
+  # actions:
+  #   - action: add_optimizer
+  #     variables:
+  #       mac_or_label: string
+  #     then:
+  #       - lambda: 'id(bus).add_optimizer(mac_or_label);'
+  #   - action: remove_optimizer
+  #     variables:
+  #       mac_or_label: string
+  #     then:
+  #       - lambda: 'id(bus).remove_optimizer(mac_or_label);'
+
+ota:
+  - platform: esphome
+    encryption:
+    allow_partition_access: true
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+web_server:
+  port: 80
+
+# Safe mode sets up only Wi-Fi, OTA and the logger, so the UART never takes
+# GPIO4: hold the driver off instead of leaving the pin to float.
+safe_mode:
+  on_safe_mode:
+    lambda: |-
+      gpio_reset_pin(GPIO_NUM_4);
+      gpio_set_direction(GPIO_NUM_4, GPIO_MODE_OUTPUT);
+      gpio_set_level(GPIO_NUM_4, 0);
+      ESP_LOGW("tigo_master", "Safe mode: GPIO4 held low, the RS485 driver is off");
+
+switch:
+  - platform: restart
+    name: "Tigo Bench Master Restart"
+  # - platform: gpio
+  #   id: rs485_power_5v
+  #   name: "RS485 5V Enable"
+  #   internal: true
+  #   pin: GPIO16  # 5V_EN — ME2107 boost that feeds the transceiver
+  #   restore_mode: ALWAYS_ON
+  # - platform: gpio
+  #   id: rs485_auto_direction
+  #   name: "RS485 AutoDirection Enable"
+  #   internal: true
+  #   pin: GPIO4  # /RE high => the AutoDirection state machine owns the receiver
+  #   restore_mode: ALWAYS_ON
+  # - platform: gpio
+  #   id: rs485_chip_enable
+  #   name: "RS485 Chip Enable"
+  #   internal: true
+  #   pin: GPIO19  # SHDN high => normal operation (low shuts the whole chip down)
+  #   restore_mode: ALWAYS_ON
+
+uart:
+  id: tigo_uart
+  flow_control_pin:
+    number: GPIO4
+    inverted: false
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 38400
+  rx_buffer_size: 2048
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+  # debug:
+  #   direction: BOTH
+  #   dummy_receiver: false
+  #   after:
+  #     timeout: 20ms
+
+tigo_monitor:
+  id: tigo_hub
+  uart_id: bus
+  number_of_devices: 30
+  time_id: tigo_time
+  update_interval: 30s  
+
+tigo_master:
+  id: bus
+  uart_id: tigo_uart
+  monitor_id: tigo_hub
+  # The only master on the bench: it runs the bus from boot.
+  role: master
+  # The one TAP. A TAP fresh from the factory is moved to this address.
+  taps: [0x1201]
+  housekeeping: true
+  queries: true
+  optimizer_writes: false
+  startup: true
+  
+  # Automatically provision a single factory-fresh TAP on startup.
+  #
+  # How it works:
+  #   On boot (or standby takeover), reads the TAP's active radio config
+  #   (GatewayCfg 0x0D 00 00).
+  #   - If the TAP is on factory radio settings (channel outside 11..26 or an
+  #     all-zero 16-byte key), it assigns a channel, PAN ID, mesh profile map,
+  #     and network key, and persists them to flash (0x0D 00 01 on H1 firmware,
+  #     CMD_STORE 0x0012 on G8 firmware) without resetting the TAP.
+  #   - If the TAP already has a valid channel (11..26) and a non-zero key,
+  #     initialization is bypassed.
+  #   - Multiple TAPs are not supported: if more than one TAP is configured or
+  #     detected on the bus, an error is logged and nothing is written.
+  #
+  # Usage:
+  #   Set `initialize_tap: true` to auto-derive all settings, or provide a
+  #   mapping to override any subset of the optional fields below:
+  #     channel: 11..26 (default: auto, picks 15 to clear Wi-Fi channels 1/6/11)
+  #       IEEE 802.15.4 radio channel used by the TAP and its optimizers.
+  #     pan: 0x0001..0xFFFE (default: auto, derived from low 16 bits of TAP MAC)
+  #       16-bit IEEE 802.15.4 PAN ID (network ID). 0x0000 and 0xFFFF are invalid.
+  #     profile: 40 | 75 | 120 | 300 (default: auto, keeps valid TAP profile or sizes for table)
+  #       Optimizer capacity profile determining the mesh slot map:
+  #         40  -> 12-2-2-1/28/1
+  #         75  -> 14-2-2-1/28/1
+  #         120 -> 20-2-2-1/28/1
+  #         300 -> 24-4-2-1/28/1
+  #     key: 32 hex chars (default: auto, cryptographically random 16-byte key)
+  #       16-byte network encryption key (32 hex digits, spaces ignored).
+  #       No byte may be 0x00 or 0xFF.
+  # initialize_tap: true
+  # initialize_tap:
+  #   channel: 15
+  #   pan: 0x1A2B
+  #   profile: 40
+  #   key: "0102030405060708090A0B0C0D0E0F10"
+  initialize_tap: true
+
+  # Allow runtime TAP optimizer table writes (0x29 add / 0x2B erase+rewrite).
+  # Keep false unless you want to add or remove optimizers; dry_run still works
+  # when false. Note: remove_optimizer backs up survivors in RAM only (no flash
+  # writes during bus-master operation).
+  table_writes: true
+  # Optional Home Assistant entities to add/remove optimizers from the UI.
+  # Accepts a printed Tigo label (e.g. "4-9A57A2L") or a 16-hex MAC ("04C05B...").
+  optimizer_input:
+    name: "Optimizer MAC or label"
+  add_optimizer:
+    name: "Add optimizer"
+  remove_optimizer:
+    name: "Remove optimizer"
+
+  status:
+    name: "Bus master"
+  problem:
+    name: "Bus master problem"
+  discovery_remaining:
+    name: "Bus master discovery window remaining"
+
+sensor:
+  - platform: tigo_monitor
+    tigo_monitor_id: tigo_hub
+    name: "Total Output Power"
+  - platform: tigo_monitor
+    tigo_monitor_id: tigo_hub
+    name: "Total Energy Out"
+  - platform: tigo_monitor
+    tigo_monitor_id: tigo_hub
+    name: "Active Device Count"
+  - platform: tigo_monitor
+    tigo_monitor_id: tigo_hub
+    name: "Free Internal RAM"
+  - platform: tigo_monitor
+    tigo_monitor_id: tigo_hub
+    name: "Missed Frame Count"
+
+text_sensor:
+
+binary_sensor:

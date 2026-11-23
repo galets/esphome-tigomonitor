@@ -79,6 +79,19 @@ void TigoMasterComponent::setup() {
   if (standby_)
     core_->set_standby(takeover_s_, [this](const char *d, size_t n) { on_listen_(d, n); },
                        [this] { return learned_.entries(); });
+  core_->set_table_writes(table_writes_);
+  core_->set_table_saved([this](const tigo_monitor::master::Bytes &mac,
+                                const std::vector<tigo_monitor::master::TableRecord> *survivors) {
+    std::lock_guard<std::mutex> lock(table_backup_mu_);
+    if (survivors == nullptr) {
+      table_backup_mac_.clear();
+      table_backup_survivors_.clear();
+    } else {
+      table_backup_mac_ = mac;
+      table_backup_survivors_ = *survivors;
+    }
+    return true;
+  });
   if (initialize_tap_.enabled) core_->set_initialize_tap(initialize_tap_);
   // The TAPs: the YAML's, else the ones saved; neither, the one at gateway_id.
   taps_pref_ = global_preferences->make_preference<TapsPref>(fnv1_hash("tigo_master_taps"));
@@ -215,6 +228,96 @@ void PvOutputSwitch::write_state(bool on) {
 }
 #endif
 
+#ifdef USE_BUTTON
+void AddOptimizerButton::press_action() {
+  if (parent_ == nullptr) return;
+  parent_->add_optimizer(parent_->optimizer_input_value());
+}
+
+void RemoveOptimizerButton::press_action() {
+  if (parent_ == nullptr) return;
+  parent_->remove_optimizer(parent_->optimizer_input_value());
+}
+#endif
+
+bool TigoMasterComponent::parse_optimizer_(const std::string &mac_or_label, tigo_monitor::master::Bytes &mac,
+                                           std::string &why) {
+  namespace mp = tigo_monitor::master;
+  std::string trimmed;
+  for (char c : mac_or_label)
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') trimmed += c;
+  if (trimmed.empty()) {
+    why = "give an optimizer's printed label (e.g. 4-9A57A2L) or 16-hex MAC";
+    return false;
+  }
+  if (trimmed.find('-') != std::string::npos) {
+    if (mp::mac_of_label(trimmed, mac)) return true;
+    why = "invalid optimizer label (check for a typo in the check letter)";
+    return false;
+  }
+  std::string hex;
+  for (char c : trimmed)
+    if (c != ':') hex += c;
+  if (hex.size() == 16 && hex.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) {
+    mac.clear();
+    for (size_t i = 0; i < 16; i += 2) mac.push_back(static_cast<uint8_t>(std::strtoul(hex.substr(i, 2).c_str(), nullptr, 16)));
+    if (!mp::label_of(mac).empty()) return true;
+    why = "not a Tigo optimizer MAC (must start with 04C05B)";
+    return false;
+  }
+  why = "give an optimizer's printed label (e.g. 4-9A57A2L) or 16-hex MAC";
+  return false;
+}
+
+bool TigoMasterComponent::add_optimizer(const std::string &mac_or_label, uint16_t id, bool dry_run, uint16_t tap) {
+  if (!core_) {
+    ESP_LOGE(TAG, "table add: bus master is not running");
+    return false;
+  }
+  tigo_monitor::master::Bytes mac;
+  std::string why;
+  if (!parse_optimizer_(mac_or_label, mac, why)) {
+    ESP_LOGW(TAG, "table add refused (%s): %s", mac_or_label.c_str(), why.c_str());
+    return false;
+  }
+  if (id != 0 && (id < 2 || id > 0x03FF)) {
+    ESP_LOGW(TAG, "table add refused (%s): id must be 0 (auto) or 0x0002..0x03FF", mac_or_label.c_str());
+    return false;
+  }
+  std::set<uint16_t> avoid;
+  if (monitor_ != nullptr && core_->taps().size() > 1) {
+    for (const auto &d : monitor_->get_devices())
+      avoid.insert(static_cast<uint16_t>(strtoul(d.addr.c_str(), nullptr, 16) & 0x7FFF));
+  }
+  if (!core_->request_table_add(mac, id, dry_run, why, tap, avoid)) {
+    ESP_LOGW(TAG, "table add refused (%s): %s", tigo_monitor::master::mac_hex(mac).c_str(), why.c_str());
+    return false;
+  }
+  ESP_LOGI(TAG, "table add started: %s (%s)%s", tigo_monitor::master::mac_hex(mac).c_str(),
+           tigo_monitor::master::label_of(mac).c_str(), dry_run ? " [dry run]" : "");
+  return true;
+}
+
+bool TigoMasterComponent::remove_optimizer(const std::string &mac_or_label, bool dry_run, uint16_t tap) {
+  if (!core_) {
+    ESP_LOGE(TAG, "table remove: bus master is not running");
+    return false;
+  }
+  tigo_monitor::master::Bytes mac;
+  std::string why;
+  if (!parse_optimizer_(mac_or_label, mac, why)) {
+    ESP_LOGW(TAG, "table remove refused (%s): %s", mac_or_label.c_str(), why.c_str());
+    return false;
+  }
+  if (!core_->request_table_remove(mac, dry_run, why, tap)) {
+    ESP_LOGW(TAG, "table remove refused (%s): %s", tigo_monitor::master::mac_hex(mac).c_str(), why.c_str());
+    return false;
+  }
+  ESP_LOGI(TAG, "table remove started: %s (%s)%s", tigo_monitor::master::mac_hex(mac).c_str(),
+           tigo_monitor::master::label_of(mac).c_str(), dry_run ? " [dry run]" : "");
+  return true;
+}
+
 // The optimizers heard in the last day, so one removed from the roof drops
 // out by itself, as on the Pi.
 void TigoMasterComponent::refresh_targets_() {
@@ -287,6 +390,7 @@ void TigoMasterComponent::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Bring-up: %s, housekeeping: %s, queries: %s%s", YESNO(startup_), YESNO(housekeeping_),
                 YESNO(queries_), writes_ ? " (with the CCA's two writes)" : "");
+  ESP_LOGCONFIG(TAG, "  Table writes: %s", YESNO(table_writes_));
   if (initialize_tap_.enabled) {
     char pan_buf[16];
     if (initialize_tap_.pan) snprintf(pan_buf, sizeof(pan_buf), "%04X", initialize_tap_.pan);

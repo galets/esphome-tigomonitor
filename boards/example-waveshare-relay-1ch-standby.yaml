@@ -120,42 +120,6 @@ tigo_master:
   # writes, and what their fields do isn't understood. Turn it on only if
   # the monitor it stands in for has it on.
   optimizer_writes: false
-  # Automatically provision a single factory-fresh TAP on startup.
-  #
-  # How it works:
-  #   On boot (or standby takeover), reads the TAP's active radio config
-  #   (GatewayCfg 0x0D 00 00).
-  #   - If the TAP is on factory radio settings (channel outside 11..26 or an
-  #     all-zero 16-byte key), it assigns a channel, PAN ID, mesh profile map,
-  #     and network key, and persists them to flash (0x0D 00 01 on H1 firmware,
-  #     CMD_STORE 0x0012 on G8 firmware) without resetting the TAP.
-  #   - If the TAP already has a valid channel (11..26) and a non-zero key,
-  #     initialization is bypassed.
-  #   - Multiple TAPs are not supported: if more than one TAP is configured or
-  #     detected on the bus, an error is logged and nothing is written.
-  #
-  # Usage:
-  #   Set `initialize_tap: true` to auto-derive all settings, or provide a
-  #   mapping to override any subset of the optional fields below:
-  #     channel: 11..26 (default: auto, picks 15 to clear Wi-Fi channels 1/6/11)
-  #       IEEE 802.15.4 radio channel used by the TAP and its optimizers.
-  #     pan: 0x0001..0xFFFE (default: auto, derived from low 16 bits of TAP MAC)
-  #       16-bit IEEE 802.15.4 PAN ID (network ID). 0x0000 and 0xFFFF are invalid.
-  #     profile: 40 | 75 | 120 | 300 (default: auto, keeps valid TAP profile or sizes for table)
-  #       Optimizer capacity profile determining the mesh slot map:
-  #         40  -> 12-2-2-1/28/1
-  #         75  -> 14-2-2-1/28/1
-  #         120 -> 20-2-2-1/28/1
-  #         300 -> 24-4-2-1/28/1
-  #     key: 32 hex chars (default: auto, cryptographically random 16-byte key)
-  #       16-byte network encryption key (32 hex digits, spaces ignored).
-  #       No byte may be 0x00 or 0xFF.
-  # initialize_tap: true
-  # initialize_tap:
-  #   channel: 15
-  #   pan: 0x1A2B
-  #   profile: 40
-  #   key: "0102030405060708090A0B0C0D0E0F10"
   # PV output off and on from Home Assistant, as the CCA's PV-safe button
   # did (0x0B00 00/01 through the TAP). Not rapid shutdown: the RSD cuts the
   # TAP's power. Off stays off across reboots and takeovers until turned on.

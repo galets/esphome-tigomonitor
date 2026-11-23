@@ -28,6 +28,12 @@
 #ifdef USE_SWITCH
 #include "esphome/components/switch/switch.h"
 #endif
+#ifdef USE_TEXT
+#include "esphome/components/text/text.h"
+#endif
+#ifdef USE_BUTTON
+#include "esphome/components/button/button.h"
+#endif
 #include "esphome/core/preferences.h"
 
 #include "esphome/components/tigo_monitor/tigo_monitor.h"
@@ -105,6 +111,33 @@ class PvOutputSwitch : public switch_::Switch {
 };
 #endif
 
+#ifdef USE_TEXT
+class OptimizerInputText : public text::Text {
+ protected:
+  void control(const std::string &value) override { this->publish_state(value); }
+};
+#endif
+
+#ifdef USE_BUTTON
+class AddOptimizerButton : public button::Button {
+ public:
+  void set_parent(TigoMasterComponent *p) { parent_ = p; }
+
+ protected:
+  void press_action() override;
+  TigoMasterComponent *parent_ = nullptr;
+};
+
+class RemoveOptimizerButton : public button::Button {
+ public:
+  void set_parent(TigoMasterComponent *p) { parent_ = p; }
+
+ protected:
+  void press_action() override;
+  TigoMasterComponent *parent_ = nullptr;
+};
+#endif
+
 class TigoMasterComponent : public Component, public uart::UARTComponent {
  public:
   void set_bus(uart::UARTComponent *bus) { bus_ = bus; }
@@ -123,6 +156,7 @@ class TigoMasterComponent : public Component, public uart::UARTComponent {
     queries_ = on;
     writes_ = on && writes;
   }
+  void set_table_writes(bool on) { table_writes_ = on; }
   void set_initialize_tap(bool enabled, uint16_t channel, uint16_t pan, int profile,
                           const std::vector<uint8_t> &key) {
     initialize_tap_.enabled = enabled;
@@ -157,8 +191,15 @@ class TigoMasterComponent : public Component, public uart::UARTComponent {
   MasterStatus status() const { return core_ ? core_->status() : MasterStatus{}; }
   // The owner's PV off or on; false while standing by.
   bool request_pv(bool off) { return core_ && core_->request_pv(off); }
+  // Add or remove an optimizer by printed label (e.g. "4-9A57A2L") or 16-hex MAC.
+  bool add_optimizer(const std::string &mac_or_label, uint16_t id = 0, bool dry_run = false, uint16_t tap = 0);
+  bool remove_optimizer(const std::string &mac_or_label, bool dry_run = false, uint16_t tap = 0);
 #ifdef USE_SWITCH
   void set_pv_switch(PvOutputSwitch *s) { pv_switch_ = s; }
+#endif
+#ifdef USE_TEXT
+  void set_optimizer_input(OptimizerInputText *t) { optimizer_input_ = t; }
+  std::string optimizer_input_value() const { return optimizer_input_ != nullptr ? optimizer_input_->state : ""; }
 #endif
 
   // The UART side tigo_monitor reads: what the master read off the bus.
@@ -186,6 +227,8 @@ class TigoMasterComponent : public Component, public uart::UARTComponent {
   void on_listen_(const char *data, size_t n);
   void refresh_targets_();
   void publish_();
+  static bool parse_optimizer_(const std::string &mac_or_label, esphome::tigo_monitor::master::Bytes &mac,
+                               std::string &why);
 
   uart::UARTComponent *bus_ = nullptr;
   tigo_monitor::TigoMonitorComponent *monitor_ = nullptr;
@@ -193,8 +236,12 @@ class TigoMasterComponent : public Component, public uart::UARTComponent {
   uint32_t takeover_s_ = 8;
   uint16_t gateway_id_ = 0x1201;
   std::vector<uint16_t> fixed_taps_;
-  bool startup_ = false, housekeeping_ = false, queries_ = false, writes_ = false;
+  bool startup_ = false, housekeeping_ = false, queries_ = false, writes_ = false, table_writes_ = false;
   MasterCore::InitializeTapConfig initialize_tap_;
+  // RAM-only backup of surviving records during TableRemove (no flash write).
+  std::mutex table_backup_mu_;
+  esphome::tigo_monitor::master::Bytes table_backup_mac_;
+  std::vector<esphome::tigo_monitor::master::TableRecord> table_backup_survivors_;
 
   std::unique_ptr<UartTransport> port_;
   std::unique_ptr<MasterCore> core_;
@@ -229,6 +276,9 @@ class TigoMasterComponent : public Component, public uart::UARTComponent {
   PvState pv_to_save_;     // under pv_mu_
 #ifdef USE_SWITCH
   PvOutputSwitch *pv_switch_ = nullptr;
+#endif
+#ifdef USE_TEXT
+  OptimizerInputText *optimizer_input_ = nullptr;
 #endif
 
   // The TAPs learned while standing by, in flash, so a reboot after the

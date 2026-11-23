@@ -25,7 +25,7 @@ See docs/superpowers/specs/2026-10-29-esp32-bus-master-design.md.
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
-from esphome.components import binary_sensor, sensor, switch, text_sensor, uart
+from esphome.components import binary_sensor, button, sensor, switch, text, text_sensor, uart
 from esphome.components.uart import CONF_DATA_BITS, CONF_PARITY, CONF_STOP_BITS
 from esphome.const import (
     CONF_BAUD_RATE,
@@ -34,6 +34,7 @@ from esphome.const import (
     CONF_UART_ID,
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_PROBLEM,
+    ENTITY_CATEGORY_CONFIG,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     STATE_CLASS_TOTAL_INCREASING,
@@ -43,11 +44,14 @@ from esphome.const import (
 
 CODEOWNERS = ["@RAR"]
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["sensor", "text_sensor", "binary_sensor", "switch", "tigo_monitor"]
+AUTO_LOAD = ["sensor", "text_sensor", "binary_sensor", "switch", "text", "button", "tigo_monitor"]
 
 tigo_master_ns = cg.esphome_ns.namespace("tigo_master")
 TigoMasterComponent = tigo_master_ns.class_("TigoMasterComponent", cg.Component, uart.UARTComponent)
 PvOutputSwitch = tigo_master_ns.class_("PvOutputSwitch", switch.Switch)
+OptimizerInputText = tigo_master_ns.class_("OptimizerInputText", text.Text)
+AddOptimizerButton = tigo_master_ns.class_("AddOptimizerButton", button.Button)
+RemoveOptimizerButton = tigo_master_ns.class_("RemoveOptimizerButton", button.Button)
 tigo_monitor_ns = cg.esphome_ns.namespace("tigo_monitor")
 TigoMonitorComponent = tigo_monitor_ns.class_("TigoMonitorComponent")
 
@@ -60,6 +64,10 @@ CONF_STARTUP = "startup"
 CONF_HOUSEKEEPING = "housekeeping"
 CONF_QUERIES = "queries"
 CONF_OPTIMIZER_WRITES = "optimizer_writes"
+CONF_TABLE_WRITES = "table_writes"
+CONF_OPTIMIZER_INPUT = "optimizer_input"
+CONF_ADD_OPTIMIZER = "add_optimizer"
+CONF_REMOVE_OPTIMIZER = "remove_optimizer"
 CONF_INITIALIZE_TAP = "initialize_tap"
 CONF_CHANNEL = "channel"
 CONF_PAN = "pan"
@@ -148,6 +156,12 @@ def _writes_need_queries(config):
     return config
 
 
+def _buttons_need_input(config):
+    if (CONF_ADD_OPTIMIZER in config or CONF_REMOVE_OPTIMIZER in config) and CONF_OPTIMIZER_INPUT not in config:
+        raise cv.Invalid(f"{CONF_ADD_OPTIMIZER} and {CONF_REMOVE_OPTIMIZER} require {CONF_OPTIMIZER_INPUT}")
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -168,7 +182,24 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_HOUSEKEEPING, default=False): cv.boolean,
             cv.Optional(CONF_QUERIES, default=False): cv.boolean,
             cv.Optional(CONF_OPTIMIZER_WRITES, default=False): cv.boolean,
+            cv.Optional(CONF_TABLE_WRITES, default=False): cv.boolean,
             cv.Optional(CONF_INITIALIZE_TAP): _initialize_tap,
+            cv.Optional(CONF_OPTIMIZER_INPUT): text.text_schema(
+                OptimizerInputText,
+                icon="mdi:barcode-scan",
+                mode="TEXT",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            ),
+            cv.Optional(CONF_ADD_OPTIMIZER): button.button_schema(
+                AddOptimizerButton,
+                icon="mdi:plus-circle-outline",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            ),
+            cv.Optional(CONF_REMOVE_OPTIMIZER): button.button_schema(
+                RemoveOptimizerButton,
+                icon="mdi:minus-circle-outline",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            ),
             # What tigo_monitor's check reads off the uart it is given: the bus's.
             cv.Optional(CONF_BAUD_RATE, default=38400): cv.one_of(38400, int=True),
             cv.Optional(CONF_DATA_BITS, default=8): cv.one_of(8, int=True),
@@ -209,6 +240,7 @@ CONFIG_SCHEMA = cv.All(
     cv.only_with_framework("esp-idf"),
     _writes_need_queries,
     _initialize_tap_single_tap,
+    _buttons_need_input,
 )
 
 
@@ -265,6 +297,7 @@ async def to_code(config):
     cg.add(var.set_startup(config[CONF_STARTUP]))
     cg.add(var.set_housekeeping(config[CONF_HOUSEKEEPING]))
     cg.add(var.set_queries(config[CONF_QUERIES], config[CONF_OPTIMIZER_WRITES]))
+    cg.add(var.set_table_writes(config[CONF_TABLE_WRITES]))
     if config.get(CONF_INITIALIZE_TAP) is not None:
         init_cfg = config[CONF_INITIALIZE_TAP]
         cg.add(
@@ -290,3 +323,12 @@ async def to_code(config):
         sw = await switch.new_switch(config[CONF_PV_OUTPUT])
         cg.add(sw.set_parent(var))
         cg.add(var.set_pv_switch(sw))
+    if CONF_OPTIMIZER_INPUT in config:
+        inp = await text.new_text(config[CONF_OPTIMIZER_INPUT])
+        cg.add(var.set_optimizer_input(inp))
+    if CONF_ADD_OPTIMIZER in config:
+        btn = await button.new_button(config[CONF_ADD_OPTIMIZER])
+        cg.add(btn.set_parent(var))
+    if CONF_REMOVE_OPTIMIZER in config:
+        btn = await button.new_button(config[CONF_REMOVE_OPTIMIZER])
+        cg.add(btn.set_parent(var))
